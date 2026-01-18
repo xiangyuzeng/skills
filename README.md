@@ -13,6 +13,9 @@ These skills are designed to be invoked when you receive alerts from your monito
 /investigate-ec2 <alert_payload>
 /investigate-rds <alert_payload>
 /investigate-k8s <alert_payload>
+/investigate-redis <alert_payload>
+/investigate-elasticsearch <alert_payload>
+/investigate-apm <alert_payload>
 ```
 
 **Option 2: Natural Language**
@@ -20,6 +23,9 @@ These skills are designed to be invoked when you receive alerts from your monito
 "Investigate this EC2 alert: [paste alert JSON]"
 "Help me diagnose this RDS connection issue: [paste alert]"
 "Why is my pod crashing? [paste K8s alert]"
+"Redis memory is high, please investigate"
+"Elasticsearch cluster is yellow, help me diagnose"
+"Service response time is high, investigate the APM alert"
 ```
 
 ---
@@ -28,9 +34,12 @@ These skills are designed to be invoked when you receive alerts from your monito
 
 | Skill | File | Version | Use Case |
 |-------|------|---------|----------|
-| EC2 Alert Investigation | `ec2-alert-investigation.md` | v4.1 | EC2 instance issues (disk, memory, CPU, network) |
+| EC2 Alert Investigation | `ec2-alert-investigation.md` | v5.0 | EC2/VM instance issues (disk, memory, CPU, network, I/O) |
 | RDS Alert Investigation | `rds-alert-investigation.md` | v2.0 | Database issues (connections, slow queries, replication) |
-| K8s Alert Investigation | `k8s-alert-investigation.md` | v2.0 | Kubernetes/EKS issues (pods, nodes, deployments) |
+| K8s Alert Investigation | `k8s-alert-investigation.md` | v2.0 | Kubernetes/EKS issues (pods, nodes, deployments, OOMKilled) |
+| Redis Alert Investigation | `redis-alert-investigation.md` | v1.0 | Redis/ElastiCache issues (memory, CPU, connections, latency) |
+| Elasticsearch Alert Investigation | `elasticsearch-alert-investigation.md` | v1.0 | OpenSearch/ES issues (cluster health, CPU, disk, shards) |
+| APM Alert Investigation | `apm-alert-investigation.md` | v1.0 | Application issues (JVM, response time, errors, GC) |
 
 ---
 
@@ -152,6 +161,112 @@ These skills are designed to be invoked when you receive alerts from your monito
 
 ---
 
+### 4. Redis Alert Investigation Skill
+
+**Triggers:** Use this skill when you receive alerts related to Redis/ElastiCache:
+- `Redis CPU使用率大于90%` - High CPU utilization
+- `Redis 内存使用率持续3分钟超过70%` - Memory pressure, key eviction
+- `Redis 实例连接数使用率大于30%` - Connection pool exhaustion
+- `Redis 实例命令平均时延大于2ms` - Latency issues
+- `Redis 实例流量大于32Mbps` - Network throughput issues
+
+**Investigation Phases:**
+1. **Alert Validation** - Parse metadata, identify Redis cluster
+2. **Data Availability Check** - Verify Prometheus Redis datasource
+3. **Redis Health Assessment** - Memory, CPU, connections, latency metrics
+4. **Direct Redis Diagnostics** - INFO, SLOWLOG, CLIENT LIST commands
+5. **Service Dependency Analysis** - Identify applications using this cache
+6. **AWS CloudWatch Integration** - ElastiCache metrics
+7. **Report Generation** - Comprehensive Redis diagnosis
+
+**Example:**
+```json
+{
+  "alertname": "Redis 内存使用率持续3分钟超过70%",
+  "instance": "luckyus-isales-order",
+  "severity": "warning",
+  "current_value": 75
+}
+```
+
+**MCP Tools Used:**
+- `mcp__grafana__query_prometheus` (Datasource: `ff6p0gjt24phce` - prometheus_redis)
+- `mcp__mcp-db-gateway__redis_command` (74 clusters available)
+- `mcp__cloudwatch-server__get_metric_data` (Namespace: AWS/ElastiCache)
+
+---
+
+### 5. Elasticsearch/OpenSearch Alert Investigation Skill
+
+**Triggers:** Use this skill when you receive alerts related to Elasticsearch/OpenSearch:
+- `AWS-ES CPU 使用率大于90%` - High CPU utilization
+- `AWS-ES 集群状态Red` - Critical cluster health (primary shards unallocated)
+- `AWS-ES 集群状态Yellow` - Degraded cluster health (replica shards missing)
+- `AWS-ES磁盘空间不足10G` - Storage capacity critical
+- `JVMMemoryPressure` - JVM heap memory pressure
+
+**Investigation Phases:**
+1. **Alert Validation** - Parse metadata, identify ES domain
+2. **Data Availability Check** - Verify CloudWatch access
+3. **Cluster Health Assessment** - Status, CPU, memory, shards, nodes
+4. **Root Cause Analysis by Alert Type** - Specific investigation per alert
+5. **Service Dependency Analysis** - Applications using this ES cluster
+6. **Report Generation** - Comprehensive ES diagnosis
+
+**Example:**
+```json
+{
+  "alertname": "AWS-ES 集群状态Red",
+  "domain": "luckyus-logs-es",
+  "severity": "critical"
+}
+```
+
+**MCP Tools Used:**
+- `mcp__cloudwatch-server__get_metric_data` (Namespace: AWS/ES)
+- `mcp__grafana__query_prometheus` (Datasource: `df8o21agxtkw0d`)
+- `mcp__mcp-db-gateway__mysql_query` (Service topology)
+
+---
+
+### 6. APM (Application Performance Monitoring) Alert Investigation Skill
+
+**Triggers:** Use this skill when you receive alerts related to application performance:
+- `【iZeus-策略X】` - iZeus application monitoring alerts (response time, error rate)
+- `FGC次数大于1`, `YGC次数大于15` - JVM garbage collection alerts
+- `服务响应时间` - Service response time degradation
+- `服务异常数` - Service error rate increase
+- `服务调用数突然下降或上升` - Traffic anomalies
+
+**Investigation Phases:**
+1. **Alert Validation** - Parse metadata, identify service
+2. **Data Availability Check** - Verify iZeus/Prometheus connectivity
+3. **JVM Health Assessment** - Heap, GC, threads, class loading
+4. **Response Time Analysis** - P50, P90, P99 latencies
+5. **Error Rate Investigation** - Exception patterns, error types
+6. **Traffic Analysis** - Request volume, throughput changes
+7. **Dependency Check** - Database, Redis, external services
+8. **CloudWatch Log Analysis** - Exception search and patterns
+9. **Report Generation** - Comprehensive APM diagnosis
+
+**Example:**
+```json
+{
+  "alertname": "【iZeus-策略5】服务响应时间增加",
+  "service_name": "order-api",
+  "severity": "warning",
+  "response_time_p99": 2500
+}
+```
+
+**MCP Tools Used:**
+- `mcp__grafana__query_prometheus` (Datasource: `df8o21agxtkw0d`)
+- `mcp__cloudwatch-server__execute_log_insights_query`
+- `mcp__mcp-db-gateway__mysql_query` (Service dependencies)
+- `mcp__mcp-db-gateway__redis_command` (Cache health)
+
+---
+
 ## Service Priority Classification
 
 All skills use a consistent priority classification:
@@ -236,14 +351,30 @@ A: Ensure the IAM role has `CloudWatchLogsReadOnlyAccess` permission.
 
 ```
 /app/skills/
-├── README.md                      # This file
-├── ec2-alert-investigation.md     # EC2 skill (406 lines)
-├── rds-alert-investigation.md     # RDS skill (667 lines)
-├── k8s-alert-investigation.md     # K8s skill (776 lines)
-├── skills-comparison.md           # Side-by-side comparison
-└── use-cases.md                   # Real-world use case examples
+├── README.md                              # This file
+├── ec2-alert-investigation.md             # EC2/VM skill (v5.0)
+├── rds-alert-investigation.md             # RDS skill (v2.0)
+├── k8s-alert-investigation.md             # K8s/EKS skill (v2.0)
+├── redis-alert-investigation.md           # Redis/ElastiCache skill (v1.0)
+├── elasticsearch-alert-investigation.md   # Elasticsearch/OpenSearch skill (v1.0)
+├── apm-alert-investigation.md             # APM/Application skill (v1.0)
+├── skills-comparison.md                   # Side-by-side comparison
+└── use-cases.md                           # Real-world use case examples
 ```
 
 ---
 
-*Version: 1.0 | Last Updated: 2026-01-18*
+## Alert Coverage Summary
+
+| Alert Category | Skill | Alert Examples |
+|---------------|-------|----------------|
+| **VM/EC2** | EC2 Investigation | 【vm-CPU】, 【vm-内存】, 【vm-磁盘】, 【vm-io】, 【vm-tcp】 |
+| **Database** | RDS Investigation | DatabaseConnections, SlowQueries, ReplicaLag, FreeStorageSpace |
+| **Kubernetes** | K8s Investigation | KubePodCrashLooping, OOMKilled, Pending, NodeNotReady |
+| **Cache** | Redis Investigation | Redis CPU, 内存使用率, 连接数, 命令时延 |
+| **Search** | Elasticsearch Investigation | AWS-ES CPU, 集群状态Red/Yellow, 磁盘空间不足 |
+| **Application** | APM Investigation | 【iZeus-策略X】, FGC, YGC, 服务响应时间, 异常数 |
+
+---
+
+*Version: 2.0 | Last Updated: 2026-01-18*

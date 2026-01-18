@@ -1,10 +1,31 @@
 # EC2 Alert Investigation Skill
 
-> Version: 4.1 | Edition: EC2 Instance Diagnosis | Platform: AWS EC2 Instances
+> Version: 5.0 | Edition: EC2 Instance Diagnosis | Platform: AWS EC2 Instances
 
 ## Skill Trigger
 
 Use this skill when you receive alerts related to EC2 instances, including:
+
+### VM Alert Types (from production alerting)
+| Alert Pattern | Chinese Name | Threshold |
+|---------------|--------------|-----------|
+| `【vm-CPU】P1` | CPU平均负载大于CPU核心数量的1倍 | Load > cores |
+| `【vm-CPU】P1` | 服务整体CPU平均使用率超过80% | CPU > 80% |
+| `【vm-cpu】P0` | CPU_iowait每秒的使用率大于80% | IOWait > 80% |
+| `【vm-cpu】P0` | 服务CPU使用率窃取大于10% | CPU steal > 10% |
+| `【vm-内存】P1` | 内存使用率大于90% 持续10分钟 | Memory > 90% |
+| `【vm-磁盘】P1` | 分区使用率大于90% | Disk > 90% |
+| `【vm-fileSystem】P0` | 分区inodes使用率大于95% | Inodes > 95% |
+| `【vm-fileSystem】P0` | 分区发送只读事件 | Read-only FS |
+| `【vm-io】P0` | 服务io耗时大于90ms | IO latency > 90ms |
+| `【vm-io】P1` | 磁盘IO使用率大于70% | IO util > 70% |
+| `【vm-tcp】P0` | TCP每秒重传报文数超过200 | TCP retrans > 200/s |
+| `【vm-网卡】P0` | 入/出方向每秒丢弃数据包大于20 | Packet drops > 20/s |
+| `【vm-网卡】P0` | 网卡状态为down | NIC down |
+| `【vm-宕机】P0` | up监控指标心跳丢失10分钟 | Instance down |
+| `【iZeus】Node-*` | Node-CPU-85, Node-Disk-85, Node-Memory-95 | Various |
+
+### Legacy Alert Names
 - **Disk Alerts**: `DiskUsedPercent`, `DiskInodesUsedPercent`, disk I/O issues
 - **Memory Alerts**: `MemUsedPercent`, OOM events, memory pressure
 - **CPU Alerts**: `CPUTotalUsedPercent`, CPU throttling, high load average
