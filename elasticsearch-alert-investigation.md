@@ -1,498 +1,232 @@
-# Elasticsearch/OpenSearch Alert Investigation Skill
-
-> Version: 1.0 | Edition: AWS OpenSearch/Elasticsearch Diagnosis | Platform: AWS OpenSearch Service
-
-## Skill Trigger
-
-Use this skill when you receive alerts related to Elasticsearch/OpenSearch clusters, including:
-- **CPU Alerts**: `AWS-ES CPU 使用率大于90%`
-- **Cluster Health Alerts**: `AWS-ES 集群状态Red`, `AWS-ES 集群状态Yellow`
-- **Storage Alerts**: `AWS-ES磁盘空间不足10G`
-- **Memory Alerts**: `JVMMemoryPressure`, `MasterJVMMemoryPressure`
-- **Index Alerts**: Index write blocked, shard allocation issues
-
+---
+name: elasticsearch-alert-investigation
+description: This skill should be used when the user asks to "investigate Elasticsearch alert", "debug ES cluster", "check OpenSearch health", "analyze search performance", mentions Elasticsearch/OpenSearch issues, cluster health red/yellow, shard allocation problems, JVM memory pressure, or receives alerts about search clusters including index issues, query latency, or storage problems.
+version: 2.0.0
 ---
 
-## Verified Data Sources
+# Elasticsearch/OpenSearch Alert Investigation Skill v2.0
 
-**Prometheus Datasources**:
-- `UMBQuerier-Luckin` (UID: `df8o21agxtkw0d`) - ES health checks and AWS metrics
+## Overview
 
-**Available Metrics**:
-```promql
-# ES Health Check Metric
-health_check_storage_elasticsearch
+Comprehensive protocol for investigating Elasticsearch/OpenSearch cluster alerts with cluster health analysis, shard diagnostics, and performance troubleshooting.
 
-# AWS ElastiCache metrics (for context)
-aws_elasticache_cpuutilization_average
-```
+## Quick Reference
 
-**AWS CloudWatch**:
-- OpenSearch metrics: `AWS/ES` namespace
-- CloudWatch alarms for ES domains
+| Data Source | UID/Server | Purpose |
+|-------------|------------|---------|
+| Prometheus | `df8o21agxtkw0d` (UMBQuerier-Luckin) | ES exporter metrics |
+| CloudWatch | ES namespace | AWS OpenSearch metrics |
+| DevOps DB | `aws-luckyus-devops-rw` | Service topology |
 
-**MySQL DevOps Database**:
-- Server: `aws-luckyus-devops-rw` (service topology, alert logs)
+## Alert Categories
 
----
+| Category | Trigger Conditions | Priority |
+|----------|-------------------|----------|
+| Cluster Health | Status RED or YELLOW | L0 (RED) / L1 (YELLOW) |
+| CPU | > 80% sustained | L1/L2 |
+| JVM Memory | Heap > 85% | L0/L1 |
+| Storage | < 15% free OR < 10GB | L0/L1 |
+| Shards | Unassigned shards > 0 | L1 |
+| Query Latency | p99 > 500ms | L1/L2 |
 
 ## Investigation Protocol
 
-### Phase 0: Alert Validation
+### Phase 1: Alert Validation (Max 30s)
 
-**Objective**: Extract and validate alert metadata
+Extract from alert payload:
+- `cluster_name`, `domain_name`
+- Alert type, current value, threshold
+- Node count and roles
 
-**Actions**:
-1. Parse the alert payload to extract:
-   - `alertname`: The specific alert type
-   - `domain` or `cluster`: ES domain name
-   - `severity`: Alert level (critical, warning, info)
-   - `startsAt`: Alert start timestamp
+Classify cluster tier:
+- **L0**: Production search (product, order search)
+- **L1**: Business analytics, logging
+- **L2**: Development, testing clusters
 
-2. Identify ES domain from alert:
-```
-# Common patterns:
-# - aws-luckyus-es-domain
-# - luckyus-logs-es
-# - luckyus-search-es
-```
+### Phase 2: Parallel Health Collection
 
-3. Determine service priority level:
-```sql
--- Query service level from DevOps DB
--- Server: aws-luckyus-devops-rw
-SELECT service_name, level, owner, oncall_group
-FROM service_registry
-WHERE service_name LIKE '%elasticsearch%' OR service_name LIKE '%search%';
-```
+**CRITICAL**: Execute these Prometheus queries in parallel:
 
-**Priority Classification**:
-| Priority | Response Time | Alert Type |
-|----------|---------------|------------|
-| L0 | < 15 minutes | Cluster Status Red, Write Blocked |
-| L1 | < 30 minutes | Cluster Status Yellow, High CPU |
-| L2 | < 2 hours | Low disk warning, High JVM memory |
-
----
-
-### Phase 1: Data Availability Check
-
-**Objective**: Verify ES metrics are accessible
-
-**Actions**:
-
-1. **Check Prometheus ES Health Metric**:
 ```promql
--- Use Grafana MCP: mcp__grafana__query_prometheus
--- Datasource UID: df8o21agxtkw0d (UMBQuerier-Luckin)
-health_check_storage_elasticsearch
+# Cluster Health (parallel)
+elasticsearch_cluster_health_status{cluster="$CLUSTER"}
+elasticsearch_cluster_health_number_of_nodes{cluster="$CLUSTER"}
+elasticsearch_cluster_health_active_shards{cluster="$CLUSTER"}
+elasticsearch_cluster_health_unassigned_shards{cluster="$CLUSTER"}
+elasticsearch_cluster_health_relocating_shards{cluster="$CLUSTER"}
+
+# Resource Usage (parallel)
+elasticsearch_jvm_memory_used_bytes{cluster="$CLUSTER"} / elasticsearch_jvm_memory_max_bytes{cluster="$CLUSTER"}
+elasticsearch_process_cpu_percent{cluster="$CLUSTER"}
+elasticsearch_filesystem_data_available_bytes{cluster="$CLUSTER"}
+elasticsearch_filesystem_data_size_bytes{cluster="$CLUSTER"}
 ```
 
-2. **Check CloudWatch metrics availability** (use mcp__cloudwatch-server__get_metric_data):
-```
-Namespace: AWS/ES
-MetricName: ClusterStatus.green
-Dimensions: DomainName=<domain_name>, ClientId=<account_id>
-```
+### Phase 3: Cluster Status Deep Dive
 
-**If data unavailable**: Document gap and proceed with CloudWatch as primary source.
+**Health Status Interpretation**:
+- `GREEN (1)`: All primary and replica shards assigned
+- `YELLOW (2)`: All primaries assigned, some replicas unassigned
+- `RED (3)`: Some primary shards unassigned
 
----
-
-### Phase 2: Cluster Health Assessment
-
-**Objective**: Collect comprehensive ES cluster metrics
-
-**Execute queries using mcp__cloudwatch-server__get_metric_data**:
-
-#### 2a. Cluster Status Metrics
-```
-Namespace: AWS/ES
-Metrics:
-  - ClusterStatus.green (value=1 means healthy)
-  - ClusterStatus.yellow (value=1 means degraded)
-  - ClusterStatus.red (value=1 means critical)
-Dimensions: DomainName=<domain_name>
-Period: 60 seconds
-```
-
-**Status Interpretation**:
-| Status | Meaning | Action Required |
-|--------|---------|-----------------|
-| Green | All primary and replica shards allocated | Normal operation |
-| Yellow | All primary shards allocated, some replicas missing | Monitor, plan maintenance |
-| Red | Some primary shards not allocated | **IMMEDIATE ACTION REQUIRED** |
-
-#### 2b. CPU Metrics
-```
-Metrics:
-  - CPUUtilization
-  - MasterCPUUtilization
-Thresholds:
-  - Warning: > 70%
-  - Critical: > 90%
-```
-
-#### 2c. Memory Metrics
-```
-Metrics:
-  - JVMMemoryPressure (percentage)
-  - MasterJVMMemoryPressure
-  - FreeStorageSpace (bytes)
-Thresholds:
-  - JVM Memory Warning: > 80%
-  - JVM Memory Critical: > 95%
-  - Storage Warning: < 20GB
-  - Storage Critical: < 10GB
-```
-
-#### 2d. Index and Shard Metrics
-```
-Metrics:
-  - Shards.active
-  - Shards.unassigned
-  - Shards.delayedUnassigned
-  - Shards.activePrimary
-  - Shards.initializing
-  - Shards.relocating
-```
-
-#### 2e. Request Metrics
-```
-Metrics:
-  - SearchRate
-  - IndexingRate
-  - SearchLatency
-  - IndexingLatency
-  - 2xx (successful requests)
-  - 4xx (client errors)
-  - 5xx (server errors)
-```
-
-#### 2f. Node Metrics
-```
-Metrics:
-  - Nodes (total node count)
-  - MasterReachableFromNode
-  - ThreadpoolWriteQueue
-  - ThreadpoolSearchQueue
-  - ThreadpoolBulkRejected
-  - ThreadpoolSearchRejected
-```
-
----
-
-### Phase 3: Root Cause Analysis by Alert Type
-
-**Objective**: Targeted investigation based on alert category
-
-#### 3a. Cluster Status Red Investigation
-
-**Check for unassigned shards**:
-```
-Metrics to check:
-- Shards.unassigned > 0
-- Shards.activePrimary < expected
-```
-
-**Common Causes**:
-1. **Node failure**: Check `Nodes` count vs expected
-2. **Disk space exhaustion**: Check `FreeStorageSpace`
-3. **JVM memory pressure**: Check `JVMMemoryPressure`
-4. **Network issues**: Check `MasterReachableFromNode`
-
-**Recovery Actions**:
-| Cause | Immediate Action |
-|-------|------------------|
-| Node failure | Scale up cluster, wait for recovery |
-| Disk full | Delete old indices, increase storage |
-| JVM pressure | Reduce indexing rate, increase heap |
-
-#### 3b. Cluster Status Yellow Investigation
-
-**Check for missing replicas**:
-```
-Metrics to check:
-- Shards.unassigned > 0 (but Shards.activePrimary = expected)
-- Node count might be < replica count + 1
-```
-
-**Common Causes**:
-1. **Insufficient nodes for replicas**
-2. **Node temporarily unavailable**
-3. **Shard allocation disabled**
-4. **Index settings mismatch**
-
-#### 3c. High CPU Investigation
-
-**Check workload metrics**:
-```
-Metrics to check:
-- SearchRate (too many searches?)
-- IndexingRate (too much indexing?)
-- ThreadpoolSearchQueue (queries backing up?)
-- ThreadpoolWriteQueue (writes backing up?)
-```
-
-**Common Causes**:
-1. **Heavy search workload**: Optimize queries, add nodes
-2. **Heavy indexing**: Reduce bulk size, add nodes
-3. **Complex aggregations**: Review query patterns
-4. **Garbage collection**: Check JVMMemoryPressure
-
-#### 3d. Disk Space Investigation
-
-**Check storage metrics**:
-```
-Metrics to check:
-- FreeStorageSpace
-- ClusterUsedSpace
-- DeletedDocuments (tombstones consuming space)
-```
-
-**Common Causes**:
-1. **Index growth**: Set up ILM (Index Lifecycle Management)
-2. **No retention policy**: Delete old indices
-3. **Too many replicas**: Reduce replica count
-4. **Deleted docs not purged**: Force merge
-
----
-
-### Phase 4: Service Dependency Analysis
-
-**Objective**: Identify applications using this ES cluster
-
-**Actions**:
-
-1. **Query service-to-ES mapping**:
-```sql
--- Server: aws-luckyus-devops-rw
-SELECT service_name, es_domain, index_pattern, purpose
-FROM service_es_mapping
-WHERE es_domain LIKE '%<domain_name>%';
-```
-
-2. **Common ES Use Cases**:
-
-| Use Case | Typical Domain | Services |
-|----------|----------------|----------|
-| Application Logs | luckyus-logs-es | All services (ELK stack) |
-| Product Search | luckyus-search-es | isales-commodity, shop |
-| Analytics | luckyus-analytics-es | bigdata, reporting |
-| APM Data | luckyus-apm-es | skywalking, iZeus |
-
-3. **Check dependent service health**:
+**Node Health Analysis**:
 ```promql
--- Datasource UID: df8o21agxtkw0d
-up{job=~".*<service_name>.*"}
+# Per-node metrics
+elasticsearch_jvm_gc_collection_seconds_sum{cluster="$CLUSTER"}
+elasticsearch_thread_pool_rejected_count{cluster="$CLUSTER"}
+elasticsearch_breakers_tripped{cluster="$CLUSTER"}
 ```
 
----
+### Phase 4: Shard Analysis (for cluster health issues)
 
-### Phase 5: Alert History Analysis
+**Unassigned Shard Investigation**:
+```promql
+elasticsearch_indices_shards_docs{cluster="$CLUSTER",type="primary"}
+elasticsearch_indices_store_size_bytes{cluster="$CLUSTER"}
+```
 
-**Objective**: Analyze historical alert patterns
+Common unassigned reasons:
+- `INDEX_CREATED`: New index awaiting allocation
+- `CLUSTER_RECOVERED`: Recovery in progress
+- `NODE_LEFT`: Node departed cluster
+- `ALLOCATION_FAILED`: Disk space or node capacity
+- `REPLICA_ADDED`: Adding replicas
 
-**Actions**:
+### Phase 5: Index Performance Analysis
 
-1. **Query alert history from DevOps DB**:
+**Query Performance**:
+```promql
+# Search latency
+rate(elasticsearch_indices_search_query_time_seconds_total{cluster="$CLUSTER"}[5m]) /
+rate(elasticsearch_indices_search_query_total{cluster="$CLUSTER"}[5m])
+
+# Indexing latency
+rate(elasticsearch_indices_indexing_index_time_seconds_total{cluster="$CLUSTER"}[5m]) /
+rate(elasticsearch_indices_indexing_index_total{cluster="$CLUSTER"}[5m])
+
+# Request rate
+rate(elasticsearch_indices_search_query_total{cluster="$CLUSTER"}[5m])
+```
+
+**Indexing Pressure**:
+```promql
+elasticsearch_indices_indexing_index_current{cluster="$CLUSTER"}
+elasticsearch_indices_get_current{cluster="$CLUSTER"}
+elasticsearch_indices_merges_current{cluster="$CLUSTER"}
+```
+
+### Phase 6: JVM Analysis (for memory alerts)
+
+```promql
+# Heap usage per pool
+elasticsearch_jvm_memory_pool_used_bytes{cluster="$CLUSTER"}
+elasticsearch_jvm_memory_pool_max_bytes{cluster="$CLUSTER"}
+
+# GC metrics
+rate(elasticsearch_jvm_gc_collection_seconds_sum{cluster="$CLUSTER"}[5m])
+rate(elasticsearch_jvm_gc_collection_seconds_count{cluster="$CLUSTER"}[5m])
+```
+
+GC Pressure Indicators:
+- Young GC > 50ms average = investigate allocation rate
+- Old GC > 1s = potential memory pressure
+- GC overhead > 5% = serious issue
+
+### Phase 7: CloudWatch Integration
+
+Query AWS OpenSearch/Elasticsearch metrics:
+- `ClusterStatus.green`, `ClusterStatus.yellow`, `ClusterStatus.red`
+- `CPUUtilization`
+- `JVMMemoryPressure`
+- `FreeStorageSpace`
+- `SearchLatency`, `IndexingLatency`
+- `ThreadpoolWriteRejected`, `ThreadpoolSearchRejected`
+
+### Phase 8: Service Dependency Analysis
+
 ```sql
--- Server: aws-luckyus-devops-rw
-SELECT alert_name, alert_status, instance, severity, create_time
-FROM t_umb_alert_log
-WHERE alert_name LIKE '%ES%' OR alert_name LIKE '%Elasticsearch%'
-ORDER BY create_time DESC
-LIMIT 50;
+-- Find services using this ES cluster
+SELECT s.service_name, s.service_priority,
+       sem.index_patterns, sem.query_types
+FROM services s
+JOIN service_es_mapping sem ON s.id = sem.service_id
+WHERE sem.cluster_name = '$CLUSTER';
 ```
 
-2. **Identify recurring patterns**:
-```sql
-SELECT DATE(create_time) as alert_date, alert_name, COUNT(*) as count
-FROM t_umb_alert_log
-WHERE alert_name LIKE '%ES%'
-  AND create_time > DATE_SUB(NOW(), INTERVAL 7 DAY)
-GROUP BY DATE(create_time), alert_name
-ORDER BY alert_date DESC, count DESC;
-```
+## Root Cause Patterns
 
-3. **Check for correlated alerts**:
-```sql
-SELECT alert_name, COUNT(*) as count
-FROM t_umb_alert_log
-WHERE create_time BETWEEN '<alert_start - 30min>' AND '<alert_start + 30min>'
-GROUP BY alert_name
-ORDER BY count DESC;
-```
+| Symptom Pattern | Likely Cause | Action |
+|-----------------|--------------|--------|
+| RED + unassigned primaries | Node failure or disk full | Check node status, expand storage |
+| YELLOW + unassigned replicas | Insufficient nodes | Add nodes or reduce replicas |
+| High JVM + slow GC | Heap sizing issue | Tune heap or upgrade nodes |
+| High CPU + query latency | Complex queries or no caching | Optimize queries, add caching |
+| Storage < 15% | Index growth or no ILM | Implement ILM, delete old indices |
+| Thread rejections | Overloaded cluster | Scale cluster or rate limit |
 
----
+## Cross-Skill Integration
 
-### Phase 6: Output Report Generation
+If investigation reveals:
+- **Application search timeout** → Suggest `/investigate-apm`
+- **Host resource constraints** → Suggest `/investigate-ec2`
+- **Downstream DB issues** → Suggest `/investigate-rds`
 
-**Objective**: Generate structured investigation report
+## Error Handling
 
-**Report Template**:
+| Failure Mode | Fallback Action |
+|--------------|----------------|
+| Prometheus ES exporter down | Use CloudWatch OpenSearch metrics |
+| CloudWatch unavailable | Parse ES logs from CloudWatch Logs |
+| Cluster API unreachable | Check security groups and network |
+
+## Escalation Criteria
+
+Escalate immediately if:
+- Cluster status RED for > 5 minutes
+- JVM memory > 95%
+- Primary shard loss with data at risk
+- All master nodes unavailable
+
+## Report Template
 
 ```markdown
-## Elasticsearch/OpenSearch Investigation Report
+# Elasticsearch Investigation Report
 
-### Alert Summary
-| Field | Value |
-|-------|-------|
-| Alert Name | [alertname] |
-| ES Domain | [domain_name] |
-| Severity | [L0/L1/L2] |
-| Start Time | [timestamp] |
-| Duration | [duration] |
+## Alert Summary
+- **Cluster**: [Cluster/Domain Name]
+- **Status**: [GREEN/YELLOW/RED]
+- **Tier**: [L0/L1/L2]
+- **Alert Type**: [Category]
 
-### Service Context
-- **Service Level**: [L0/L1/L2]
-- **Dependent Services**: [service_list]
-- **Service Owner**: [owner]
-- **On-Call Group**: [oncall_group]
+## Cluster Health
+| Metric | Current | Expected | Status |
+|--------|---------|----------|--------|
+| Nodes | X | Y | [OK/WARN] |
+| Active Shards | X | Y | [OK/WARN] |
+| Unassigned Shards | X | 0 | [OK/WARN/CRIT] |
 
-### Investigation Findings
+## Resource Status
+| Node | CPU | JVM Heap | Disk Free | Status |
+|------|-----|----------|-----------|--------|
+| [node1] | X% | Y% | Z GB | [OK/WARN] |
 
-#### Phase 1: Data Availability
-- CloudWatch Metrics: [Available/Unavailable]
-- Prometheus Health Check: [Available/Unavailable]
-
-#### Phase 2: Cluster Health
+## Performance Metrics
 | Metric | Current | Threshold | Status |
 |--------|---------|-----------|--------|
-| Cluster Status | [Green/Yellow/Red] | Green | [OK/WARNING/CRITICAL] |
-| CPU Utilization | [X%] | 90% | [OK/WARNING/CRITICAL] |
-| JVM Memory Pressure | [X%] | 95% | [OK/WARNING/CRITICAL] |
-| Free Storage | [X GB] | 10GB | [OK/WARNING/CRITICAL] |
-| Active Shards | [X] | [expected] | [OK/WARNING/CRITICAL] |
-| Unassigned Shards | [X] | 0 | [OK/WARNING/CRITICAL] |
-| Node Count | [X] | [expected] | [OK/WARNING/CRITICAL] |
+| Search Latency (p99) | Xms | 500ms | [OK/WARN] |
+| Indexing Rate | X/s | - | - |
+| Thread Rejections | X | 0 | [OK/WARN] |
 
-#### Phase 3: Root Cause Analysis
-**Alert Type**: [Cluster Red/Yellow/High CPU/Disk Full]
+## Root Cause
+[Determined cause with evidence]
 
-**Findings**:
-- [Detailed findings based on alert type]
+## Affected Services
+| Service | Priority | Index Pattern | Impact |
+|---------|----------|---------------|--------|
+| [name] | [L0/L1] | [pattern] | [description] |
 
-**Immediate Cause**: [Identified cause]
-
-#### Phase 4: Dependent Services
-| Service | Status | Impact |
-|---------|--------|--------|
-| [service1] | [Running/Degraded] | [Description] |
-| [service2] | [Running/Degraded] | [Description] |
-
-#### Phase 5: Alert History
-- **Recent Alert Count**: [X in last 24h]
-- **Pattern Detected**: [Yes/No - describe pattern]
-- **Correlated Alerts**: [list]
-
-### Root Cause Analysis
-**Primary Cause**: [Identified root cause]
-**Contributing Factors**: [Additional factors]
-
-### Recommendations
-| Priority | Action | Owner | Timeline |
-|----------|--------|-------|----------|
-| P0 | [Immediate action] | [team] | Immediate |
-| P1 | [Short-term fix] | [team] | 24 hours |
-| P2 | [Long-term solution] | [team] | 1 week |
-
-### Evidence
-<details>
-<summary>CloudWatch Metrics</summary>
-
-[Include CloudWatch metric data]
-
-</details>
-
-<details>
-<summary>Alert History</summary>
-
-[Include alert history from DevOps DB]
-
-</details>
-
----
-*Investigation completed at [timestamp]*
-*Skill Version: Elasticsearch Alert Investigation SOP v1.0*
+## Recommendations
+1. **Immediate**: [Action]
+2. **Short-term**: [Action]
+3. **Long-term**: [Action]
 ```
-
----
-
-## MCP Tools Reference
-
-| Tool | Server | Purpose |
-|------|--------|---------|
-| `mcp__grafana__query_prometheus` | grafana | ES health check metrics |
-| `mcp__mcp-db-gateway__mysql_query` | mcp-db-gateway | Service topology, alert logs |
-| `mcp__cloudwatch-server__get_metric_data` | cloudwatch-server | AWS OpenSearch metrics |
-| `mcp__cloudwatch-server__get_active_alarms` | cloudwatch-server | Related alarms |
-
-## Key Datasource UIDs
-
-| Datasource | UID | Use |
-|------------|-----|-----|
-| UMBQuerier-Luckin | `df8o21agxtkw0d` | ES health checks, AWS metrics |
-
-## DevOps Database
-
-| Server | Purpose |
-|--------|---------|
-| `aws-luckyus-devops-rw` | Service registry, alert logs, ES mappings |
-
----
-
-## Common ES Alert Scenarios
-
-### Scenario 1: Cluster Status Red
-**Symptoms**: ClusterStatus.red = 1, unassigned primary shards
-**Investigation Focus**:
-- Check node count (node failure?)
-- Check disk space (disk full causing write block?)
-- Check JVM memory (GC pressure?)
-- Review recent changes (index settings?)
-
-**Emergency Actions**:
-1. Scale up cluster nodes if node failure
-2. Delete old indices if disk full
-3. Increase JVM heap if memory pressure
-4. Disable new indexing temporarily if needed
-
-### Scenario 2: Cluster Status Yellow
-**Symptoms**: ClusterStatus.yellow = 1, unassigned replica shards
-**Investigation Focus**:
-- Check if node count < replica factor + 1
-- Check for node maintenance window
-- Review shard allocation settings
-
-### Scenario 3: High CPU (> 90%)
-**Symptoms**: CPUUtilization > 90% sustained
-**Investigation Focus**:
-- Check search rate and latency
-- Check indexing rate
-- Look for complex aggregations
-- Review query patterns
-
-### Scenario 4: Disk Space Critical (< 10GB)
-**Symptoms**: FreeStorageSpace < 10GB
-**Investigation Focus**:
-- Identify largest indices
-- Check index lifecycle policy
-- Look for deleted but not purged documents
-- Review replica settings
-
----
-
-## Example Usage
-
-When investigating an ES alert, invoke this skill with the alert payload:
-
-```
-/investigate-elasticsearch {
-  "alertname": "AWS-ES 集群状态Red",
-  "domain": "luckyus-logs-es",
-  "severity": "critical"
-}
-```
-
-The skill will execute all 6 phases automatically and generate a comprehensive report.
